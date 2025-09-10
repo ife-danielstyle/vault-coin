@@ -289,3 +289,129 @@
     )
   )
 )
+
+(define-public (add-collateral (btc-amount uint))
+  ;; Increase collateral in existing position
+  (let (
+      (user tx-sender)
+      (position (unwrap! (map-get? positions user) ERR-POSITION-NOT-FOUND))
+    )
+    (begin
+      (asserts! (not (var-get protocol-paused)) ERR-PROTOCOL-PAUSED)
+      (asserts! (> btc-amount u0) ERR-INVALID-AMOUNT)
+
+      (accrue-global-interest)
+
+      (let (
+          (updated-position (accrue-position-interest user))
+          (new-debt (get debt updated-position))
+          (current-collateral (get collateral updated-position))
+          (new-collateral (+ current-collateral btc-amount))
+        )
+        (begin
+          (map-set positions user {
+            collateral: new-collateral,
+            debt: new-debt,
+            last-update-block: stacks-block-height,
+          })
+
+          (var-set total-collateral (+ (var-get total-collateral) btc-amount))
+          (ok true)
+        )
+      )
+    )
+  )
+)
+
+(define-public (repay-debt (amount uint))
+  ;; Repay outstanding debt and reduce position liability
+  (let (
+      (user tx-sender)
+      (position (unwrap! (map-get? positions user) ERR-POSITION-NOT-FOUND))
+    )
+    (begin
+      (asserts! (not (var-get protocol-paused)) ERR-PROTOCOL-PAUSED)
+      (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+
+      (accrue-global-interest)
+
+      (let (
+          (updated-position (accrue-position-interest user))
+          (current-debt (get debt updated-position))
+          (collateral (get collateral updated-position))
+          (repay-amount (if (> amount current-debt)
+            current-debt
+            amount
+          ))
+          (new-debt (- current-debt repay-amount))
+        )
+        (begin
+          (asserts! (<= repay-amount current-debt) ERR-INSUFFICIENT-DEBT)
+
+          (try! (ft-burn? stable-usd repay-amount user))
+
+          (if (is-eq new-debt u0)
+            (begin
+              (map-delete positions user)
+              (var-set total-collateral (- (var-get total-collateral) collateral))
+            )
+            (map-set positions user {
+              collateral: collateral,
+              debt: new-debt,
+              last-update-block: stacks-block-height,
+            })
+          )
+
+          (var-set total-debt (- (var-get total-debt) repay-amount))
+          (ok true)
+        )
+      )
+    )
+  )
+)
+
+(define-public (withdraw-collateral (btc-amount uint))
+  ;; Withdraw excess collateral while maintaining safety ratio
+  (begin
+    (asserts! (not (var-get protocol-paused)) ERR-PROTOCOL-PAUSED)
+    (asserts! (> btc-amount u0) ERR-INVALID-AMOUNT)
+
+    (let (
+        (btc-price (try! (get-current-price)))
+        (user tx-sender)
+      )
+      (begin
+        (accrue-global-interest)
+
+        (let (
+            (updated-position (accrue-position-interest user))
+            (current-debt (get debt updated-position))
+            (current-collateral (get collateral updated-position))
+            (new-collateral (- current-collateral btc-amount))
+            (min-required-collateral (required-collateral current-debt btc-price))
+          )
+          (begin
+            (asserts! (<= btc-amount current-collateral)
+              ERR-INSUFFICIENT-COLLATERAL
+            )
+            (asserts!
+              (>= (collateral-value new-collateral btc-price)
+                min-required-collateral
+              )
+              ERR-UNDERCOLLATERALIZED
+            )
+
+            (map-set positions user {
+              collateral: new-collateral,
+              debt: current-debt,
+              last-update-block: stacks-block-height,
+            })
+
+            (var-set total-collateral (- (var-get total-collateral) btc-amount))
+            (ok true)
+          )
+        )
+      )
+    )
+  )
+)
